@@ -1,13 +1,13 @@
 # 🏭 Factory Environment Alarm
 
-![Factory Environment Alarm Overview](docs/factory_environment_alarm_overview.png)
-
 Arduino 센서와 Python · SQLite · Streamlit을 연동한 **공장 환경 이상 감지 및 재알람 모니터링 시스템**입니다.
 
 온도·습도·조도를 실시간으로 측정하고, 설정된 정상 범위를 벗어나면 Arduino에서 LED와 부저 알람을 발생시킵니다. 
 작업자가 스위치를 눌러 알람을 확인(ACK)할 수 있으며, ACK 이후에도 이상 상태가 계속 유지되면 재알람을 발생시킵니다.
 
 센서 데이터와 알람 이벤트는 USB Serial 통신을 통해 Python Middleware로 전달되고, SQLite DB에 저장된 뒤 Streamlit Dashboard에서 실시간으로 조회·시각화됩니다.
+
+![Factory Environment Alarm Overview](docs/factory_environment_alarm_overview.png)
 
 ---
 
