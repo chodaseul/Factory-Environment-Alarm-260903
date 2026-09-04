@@ -1,7 +1,7 @@
 [project]
 name = "factory-environment-alarm"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Linux + PostgreSQL version of the Factory Environment Alarm learning project"
 readme = "README.md"
 authors = [
     { name = "chodaseul", email = "badaseull@gmail.com" }
@@ -16,9 +16,6 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "streamlit>=1.63.0",
 ]
-
-[project.scripts]
-factory-environment-alarm = "factory_environment_alarm:main"
 
 [build-system]
 requires = ["uv_build>=0.12.8,<0.13.0"]
