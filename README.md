@@ -1,95 +1,267 @@
-# 🏭 Factory Environment Alarm
+# 🏭 Factory Environment Alarm V2
 
-Arduino 센서와 Python · SQLite · Streamlit을 연동한 **공장 환경 이상 감지 및 재알람 모니터링 시스템**입니다.
+Arduino 센서 기반 공장 환경 이상 감지 시스템을 **Windows + SQLite 기반 V1에서 Linux(WSL2) + PostgreSQL 기반 V2로 이식**하는 학습 프로젝트입니다.
 
-온도·습도·조도를 실시간으로 측정하고, 설정된 정상 범위를 벗어나면 Arduino에서 LED와 부저 알람을 발생시킵니다. 
-작업자가 스위치를 눌러 알람을 확인(ACK)할 수 있으며, ACK 이후에도 이상 상태가 계속 유지되면 재알람을 발생시킵니다.
+V1의 핵심 흐름인 **센서 측정 → 현장 알람 → 작업자 ACK → 재알람 → 이력 저장 → Dashboard 모니터링**은 유지하고, 운영 환경과 데이터베이스 계층을 변경했습니다.
 
-센서 데이터와 알람 이벤트는 USB Serial 통신을 통해 Python Middleware로 전달되고, SQLite DB에 저장된 뒤 Streamlit Dashboard에서 실시간으로 조회·시각화됩니다.
-
-![Factory Environment Alarm Overview](docs/factory_environment_alarm_overview.png)
+> V1 기준 코드는 `main` 브랜치에 보존합니다.  
+> 이 브랜치(`v2-postgresql-linux`)는 V1을 PostgreSQL/Linux 환경으로 옮기면서 차이점을 학습하기 위한 V2 작업 브랜치입니다.
 
 ---
 
-## 🎯 Project Goal
-
-단순 센서 출력이 아니라 다음 흐름을 구현하는 것을 목표로 했습니다.
+## 🎯 V2 Migration Goal
 
 ```text
-이상 감지
-   ↓
-현장 LED / Buzzer 알람
-   ↓
-작업자 ACK
-   ↓
-환경 상태 계속 감시
-   ↓
-미조치 시 재알람
-   ↓
-정상 복귀
-   ↓
-이력 저장 및 Dashboard 모니터링
+V1
+Windows
+  ↓
+Arduino COM Port
+  ↓
+Python Middleware
+  ↓
+SQLite (factory_alarm.db)
+  ↓
+Streamlit Dashboard
+
+            ↓ Migration
+
+V2
+Linux / WSL2
+  ↓
+Arduino Linux Serial (/dev/ttyACM0 예정)
+  ↓
+Python Middleware
+  ↓
+db.py / psycopg
+  ↓
+PostgreSQL
+  ↓
+Streamlit Dashboard
+```
+
+이번 V2의 핵심은 프로그램을 새로 만드는 것이 아니라, **기존 애플리케이션 구조를 유지한 채 DB와 실행 환경을 교체하는 것**입니다.
+
+---
+
+## 🔄 Version 1 vs Version 2
+
+| 항목 | Version 1 | Version 2 | 변경 이유 |
+|---|---|---|---|
+| OS | Windows | WSL2 Ubuntu / Linux | Linux 환경에서 재구현 및 운영 구조 학습 |
+| Database | SQLite | PostgreSQL | 파일형 DB에서 서버형 DB로 확장 |
+| Python DB 모듈 | `sqlite3` | `psycopg` | Python에서 PostgreSQL 연결 |
+| DB 위치 | `data/factory_alarm.db` | PostgreSQL Server | 로컬 DB 파일 의존 제거 |
+| 연결 설정 | `DB_PATH` | `.env`의 `DATABASE_URL` | 코드와 환경설정 분리 |
+| SQL Placeholder | `?` | `%s` | DB Driver 차이 |
+| ID | `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` | PostgreSQL 자동 증가 방식 사용 |
+| 시간 | `TEXT` | `TIMESTAMPTZ` | 실제 날짜/시간 타입 + Time Zone 지원 |
+| 측정시각 생성 | Python `datetime.now()` | PostgreSQL `DEFAULT NOW()` | 시간 기록을 DB에 위임 |
+| Alarm 상태 | `INTEGER` 0/1 | `BOOLEAN` | 데이터 의미를 명확하게 표현 |
+| Serial Port | `COM8` | `/dev/ttyACM0` 기본값 | Windows → Linux 장치 체계 변경 |
+| Serial 설정 | 코드에 직접 작성 | 환경변수로 변경 가능 | 실행 환경별 설정 분리 |
+| Dashboard | Streamlit | Streamlit | UI 역할은 유지 |
+| Arduino Protocol | `DATA`, `EVENT` | 동일 | 기존 센서/알람 흐름 재사용 |
+
+---
+
+# 🐍 Python 파일별 V1 → V2 변경점
+
+## 1. `db.py` — V2에서 새로 추가
+
+| Version 1 | Version 2 | 의미 |
+|---|---|---|
+| 별도 DB 연결 모듈 없음 | `db.py` 추가 | DB 연결 로직을 한 곳에서 관리 |
+| 각 Python 파일이 `sqlite3.connect(DB_PATH)` 실행 | `get_connection()` 사용 | Middleware / Dashboard / Init에서 동일한 연결 방식 사용 |
+| DB 파일 경로 사용 | `DATABASE_URL` 사용 | PostgreSQL Server 접속 정보 사용 |
+| 환경설정 분리 없음 | `python-dotenv`로 `.env` 로드 | 접속정보를 소스코드 밖으로 분리 |
+
+핵심 구조:
+
+```text
+.env
+ ↓
+db.py
+ ↓
+get_connection()
+ ↓
+psycopg
+ ↓
+PostgreSQL
+```
+
+`psycopg`는 **Python과 PostgreSQL을 연결하는 PostgreSQL Driver**입니다.
+
+```python
+import psycopg
+
+return psycopg.connect(DATABASE_URL)
 ```
 
 ---
 
-## 🧩 System Architecture
+## 2. `init_db.py` — DB 파일 생성 → PostgreSQL Schema 초기화
+
+| Version 1 | Version 2 | 의미 |
+|---|---|---|
+| `import sqlite3` | `get_connection()` import | DB 연결 방식 변경 |
+| `data/` 폴더 생성 | 폴더 생성 없음 | PostgreSQL은 DB 파일을 직접 만들지 않음 |
+| `factory_alarm.db` 파일 생성 | 기존 PostgreSQL DB에 접속 | 파일 DB → 서버 DB |
+| `sqlite3.connect(DB_PATH)` | `get_connection()` | 공통 DB 연결 모듈 사용 |
+| `conn.executescript(schema)` | SQL 문을 분리해 `cursor.execute()` | PostgreSQL에서 Schema 실행 |
+| DB 파일 위치 출력 | PostgreSQL DB 이름 출력 | DB 위치 개념 변화 |
+
+V1:
+
+```text
+schema.sql
+   ↓
+init_db.py
+   ↓
+factory_alarm.db 생성
+```
+
+V2:
+
+```text
+schema.sql
+   ↓
+init_db.py
+   ↓
+db.py / psycopg
+   ↓
+PostgreSQL의 factory_alarm DB에 Table 생성
+```
+
+---
+
+## 3. `middleware.py` — SQLite 저장 → PostgreSQL 저장
+
+Middleware의 본래 역할은 V1과 동일합니다.
+
+```text
+Arduino Serial 수신
+        ↓
+DATA / EVENT 파싱
+        ↓
+DB 저장
+```
+
+DB에 저장하는 방법과 Serial 환경 설정이 변경되었습니다.
+
+| Version 1 | Version 2 | 의미 |
+|---|---|---|
+| `import sqlite3` | `get_connection()` | PostgreSQL 연결 사용 |
+| `DB_PATH` 필요 | DB 파일 경로 없음 | Server DB 사용 |
+| `PORT = "COM8"` | `SERIAL_PORT` 또는 `/dev/ttyACM0` | Linux Serial 대응 |
+| `BAUDRATE = 115200` | 환경변수로 변경 가능 | 실행환경 설정 분리 |
+| `sqlite3.connect(DB_PATH)` | `with get_connection() as conn` | PostgreSQL Connection Context 사용 |
+| `VALUES (?, ?, ...)` | `VALUES (%s, %s, ...)` | psycopg Placeholder 사용 |
+| Alarm 0/1 그대로 저장 | `bool(...)` 변환 | PostgreSQL BOOLEAN 컬럼 대응 |
+| Python이 `measured_at` 생성 | DB `NOW()` 사용 | 측정시간 기록을 DB에 위임 |
+| Python이 `event_at` 생성 | DB `NOW()` 사용 | 이벤트 시간도 DB가 기록 |
+
+### Arduino 데이터 처리 자체는 유지
+
+```text
+DATA,temperature,humidity,light,temp_alarm,hum_alarm,light_alarm,acknowledged,alert_active
+```
+
+즉 Arduino가 보내는 Serial Protocol은 바꾸지 않고 **Middleware의 DB 저장 계층만 교체**했습니다.
+
+```text
+V1
+pyserial → Python → sqlite3 → SQLite
+
+V2
+pyserial → Python → psycopg → PostgreSQL
+```
+
+- `pyserial` : Python ↔ Arduino 연결
+- `psycopg` : Python ↔ PostgreSQL 연결
+
+---
+
+## 4. `dashboard.py` — SQLite 직접 조회 → PostgreSQL 조회
+
+Dashboard의 센서 카드, Trend Chart, Alarm History 역할은 유지했습니다.
+
+| Version 1 | Version 2 | 의미 |
+|---|---|---|
+| `import sqlite3` | `get_connection()` | PostgreSQL 연결 사용 |
+| `DB_PATH` 직접 사용 | `db.py` 사용 | DB 연결 코드 공통화 |
+| `pd.read_sql_query(..., sqlite connection)` | Cursor 조회 후 DataFrame 생성 | PostgreSQL 조회 결과를 pandas로 변환 |
+| SQL `?` Placeholder | `%s` Placeholder | psycopg 방식 적용 |
+| 조회 시작시간을 문자열로 생성 | Time Zone이 포함된 `datetime` 전달 | `TIMESTAMPTZ`와 맞는 시간 처리 |
+| SQLite 파일 조회 | PostgreSQL Table 조회 | 데이터 저장소 교체 |
+| 기존 Streamlit UI | 기존 기능 유지 | DB 변경과 UI 역할 분리 |
+
+V2에서는 공통 함수 `query_dataframe()`이 PostgreSQL 결과를 pandas DataFrame으로 변환합니다.
+
+```text
+Streamlit
+   ↓
+dashboard.py
+   ↓
+query_dataframe()
+   ↓
+get_connection()
+   ↓
+psycopg
+   ↓
+PostgreSQL
+```
+
+---
+
+## 🗄️ Schema 변경
+
+### `sensor_data`
+
+| V1 SQLite | V2 PostgreSQL |
+|---|---|
+| `id INTEGER PRIMARY KEY AUTOINCREMENT` | `id BIGSERIAL PRIMARY KEY` |
+| `measured_at TEXT` | `measured_at TIMESTAMPTZ DEFAULT NOW()` |
+| `temp_alarm INTEGER` | `temp_alarm BOOLEAN` |
+| `hum_alarm INTEGER` | `hum_alarm BOOLEAN` |
+| `light_alarm INTEGER` | `light_alarm BOOLEAN` |
+| `acknowledged INTEGER` | `acknowledged BOOLEAN` |
+| `alert_active INTEGER` | `alert_active BOOLEAN` |
+
+### `alarm_event`
+
+| V1 SQLite | V2 PostgreSQL |
+|---|---|
+| `id INTEGER PRIMARY KEY AUTOINCREMENT` | `id BIGSERIAL PRIMARY KEY` |
+| `event_at TEXT` | `event_at TIMESTAMPTZ DEFAULT NOW()` |
+| `event_type TEXT` | `event_type TEXT` |
+| `message TEXT` | `message TEXT` |
+
+---
+
+## 🧩 V2 System Architecture
 
 ```text
 DHT11 / Light Sensor
         ↓
-      Arduino
+Arduino UNO R4 Minima
         ↓
 LED · Buzzer · Switch
         ↓
-     USB Serial
+USB Serial
         ↓
- Python Middleware
+Linux Serial Device
+(/dev/ttyACM0 예정)
         ↓
-      SQLite
+Python Middleware
+        ↓
+       db.py
+        ↓
+      psycopg
+        ↓
+    PostgreSQL
         ↓
 Streamlit Dashboard
 ```
-
-### Arduino
-- 온도·습도·조도 측정
-- 이상 기준 판정
-- LED / Buzzer 현장 알람
-- Switch ACK 처리
-- 미조치 재알람
-- Serial 데이터 전송
-
-### Python Middleware
-- Serial 데이터 수신
-- `DATA` / `EVENT` 메시지 파싱
-- SQLite 저장
-
-### Streamlit Dashboard
-- 현재 센서값 표시
-- 정상 / 이상 상태 표시
-- Threshold 기준선 표시
-- 센서 Trend 그래프
-- 알람 Event 이력 조회
-- 조회 기간 및 데이터 수 조절
-
----
-
-## ✅ Main Features
-
-- DHT11 기반 온도·습도 측정
-- 조도 센서 기반 밝기 측정
-- 센서별 임계치 이상 판정
-- 온도 / 습도 / 조도별 LED 구분 표시
-- 최초 알람 / 재알람 부저 패턴 구분
-- 작업자 Switch ACK
-- ACK 후 이상 상태 지속 시 재알람
-- Arduino → USB Serial → Python 데이터 전달
-- SQLite 센서 데이터 및 이벤트 저장
-- Streamlit 실시간 Dashboard
-- 2초 주기 Dashboard 자동 갱신
-- 최근 1시간 / 6시간 / 24시간 / 전체 기간 조회
-- 표시 데이터 개수 Slider 조절
-- 그래프 상·하한 Red Threshold Line 표시
 
 ---
 
@@ -101,15 +273,7 @@ Streamlit Dashboard
 | 💧 습도 | 40 ~ 70 % | 40 % 미만 또는 70 % 초과 |
 | ☀️ 조도 | 300 미만 | 300 이상 |
 
-조도 센서 실측값:
-
-```text
-휴대폰 Flash   약 84
-실내 평상시    약 170
-센서 가림      약 450
-```
-
-현재 회로에서는 **센서값이 커질수록 어두운 상태**로 판단합니다.
+현재 회로에서는 **조도 센서값이 커질수록 어두운 상태**로 판단합니다.
 
 ---
 
@@ -127,44 +291,6 @@ Streamlit Dashboard
 
 ---
 
-## 🔔 Alarm Logic
-
-### 최초 이상 발생
-
-```text
-센서 이상
-   ↓
-해당 LED ON
-   ↓
-삐 - 삐 - 삐
-```
-
-### 작업자 ACK
-
-```text
-Switch 입력
-   ↓
-ACK 처리
-   ↓
-LED / Buzzer OFF
-   ↓
-센서 상태 계속 감시
-```
-
-### 미조치 재알람
-
-현재 테스트 버전에서는 ACK 후 **10초** 동안 이상 상태가 유지되면 재알람합니다.
-
-```text
-ACK
- ↓
-10초 동안 이상 지속
- ↓
-삐삐삐삐삐삐
-```
-
----
-
 ## 📡 Serial Protocol
 
 ### Sensor DATA
@@ -173,7 +299,7 @@ ACK
 DATA,temperature,humidity,light,temp_alarm,hum_alarm,light_alarm,acknowledged,alert_active
 ```
 
-정상 데이터 예:
+Example:
 
 ```text
 DATA,22.40,52.00,171,0,0,0,0,0
@@ -188,44 +314,9 @@ EVENT,RE_ALERT
 EVENT,NORMAL
 ```
 
-| Event | 의미 |
-|---|---|
-| `ALARM_START` | 환경 이상 최초 발생 |
-| `ACK` | 작업자 알람 확인 |
-| `RE_ALERT` | 미조치 재알람 |
-| `NORMAL` | 환경 정상 복귀 |
-
 ---
 
-## 🗄️ Database
-
-### `sensor_data`
-
-```text
-measured_at
-temperature
-humidity
-light
-temp_alarm
-hum_alarm
-light_alarm
-acknowledged
-alert_active
-```
-
-### `alarm_event`
-
-```text
-event_at
-event_type
-message
-```
-
-실행 중 생성되는 `*.db` 파일은 Git 관리 대상에서 제외하고, `schema.sql`과 `init_db.py`를 이용해 로컬에서 다시 생성할 수 있도록 구성했습니다.
-
----
-
-## 📁 Project Structure
+## 📁 V2 Project Structure
 
 ```text
 Factory-Environment-Alarm-260903/
@@ -237,23 +328,23 @@ Factory-Environment-Alarm-260903/
 ├── src/
 │   └── factory_environment_alarm/
 │       ├── __init__.py
-│       ├── init_db.py
-│       ├── middleware.py
-│       └── dashboard.py
+│       ├── db.py            # PostgreSQL 공통 연결
+│       ├── init_db.py       # Schema 초기화
+│       ├── middleware.py    # Serial → PostgreSQL
+│       └── dashboard.py     # PostgreSQL → Streamlit
 │
-├── data/
-│   └── factory_alarm.db       # Runtime 생성 / Git 제외
-│
-├── schema.sql
+├── schema.sql               # PostgreSQL Schema
 ├── pyproject.toml
 ├── uv.lock
 ├── .gitignore
 └── README.md
 ```
 
+V1에서 사용하던 `data/factory_alarm.db`는 V2의 데이터 저장소가 아닙니다. 실제 데이터는 PostgreSQL Server에 저장됩니다.
+
 ---
 
-## 🛠 Tech Stack
+## 🛠 V2 Tech Stack
 
 ### Hardware
 - Arduino UNO R4 Minima
@@ -262,110 +353,117 @@ Factory-Environment-Alarm-260903/
 - LED
 - Buzzer
 - Push Switch
-- Breadboard
 
 ### Software
+- WSL2 Ubuntu / Linux
 - Arduino C/C++
 - Python
 - PySerial
-- SQLite
+- PostgreSQL
+- psycopg
+- python-dotenv
 - pandas
 - Altair
 - Streamlit
+- uv
 
 ---
 
-## ▶️ How to Run
+## 🔐 Environment Variables
 
-### 1. Clone
+V2에서는 DB 접속정보와 Serial 설정을 소스코드와 분리합니다.
 
-```bash
-git clone https://github.com/chodaseul/Factory-Environment-Alarm-260903.git
-cd Factory-Environment-Alarm-260903
+`.env` 예시:
+
+```env
+DATABASE_URL=postgresql://factory_user:<PASSWORD>@localhost:5432/factory_alarm
+SERIAL_PORT=/dev/ttyACM0
+SERIAL_BAUDRATE=115200
 ```
 
-### 2. Install Dependencies
+`.env`는 `.gitignore`에 포함하여 GitHub에 업로드하지 않습니다.
+
+---
+
+## ▶️ Current V2 Run Flow
+
+### 1. Dependency 설치
 
 ```bash
 uv sync
 ```
 
-또는:
+### 2. `.env` 설정
 
-```bash
-pip install pyserial pandas streamlit altair
-```
+PostgreSQL 접속 정보를 `DATABASE_URL`에 지정합니다.
 
-### 3. Initialize Database
+### 3. PostgreSQL Schema 초기화
 
 ```bash
 python src/factory_environment_alarm/init_db.py
 ```
 
-### 4. Upload Arduino Code
-
-Arduino IDE에서 다음 파일을 업로드합니다.
-
-```text
-arduino/factory_alarm/factory_alarm.ino
-```
-
-Serial Baud Rate:
-
-```text
-115200
-```
-
-### 5. Run Middleware
-
-> Middleware 실행 전 Arduino IDE의 **Serial Monitor를 닫아야 합니다.** 동일한 COM Port를 Serial Monitor와 Python이 동시에 사용할 수 없습니다.
-
-```bash
-python src/factory_environment_alarm/middleware.py
-```
-
-### 6. Run Dashboard
+### 4. Dashboard 실행
 
 ```bash
 python -m streamlit run src/factory_environment_alarm/dashboard.py
 ```
 
-기본 접속 주소:
+### 5. Middleware 실행
 
-```text
-http://localhost:8501
+Linux에서 Arduino Serial Device 연결을 확인한 뒤 실행합니다.
+
+```bash
+python src/factory_environment_alarm/middleware.py
 ```
 
 ---
 
-## 💡 Key Implementation Points
+## ✅ Current Migration Status
 
-### 1. 현장 알람과 모니터링 역할 분리
-Arduino는 센서 판단과 현장 알람을 담당하고, Python은 데이터 수집·저장·시각화를 담당합니다.
+완료:
+- [x] WSL2 Ubuntu 개발환경 구성
+- [x] PostgreSQL 설치
+- [x] `factory_alarm` Database 생성
+- [x] `factory_user` 연결 확인
+- [x] `psycopg` 기반 `db.py` 추가
+- [x] PostgreSQL용 `schema.sql` 변환
+- [x] PostgreSQL용 `init_db.py` 변환
+- [x] PostgreSQL용 `middleware.py` 변환
+- [x] PostgreSQL용 `dashboard.py` 변환
+- [x] Streamlit → PostgreSQL 조회 확인
 
-### 2. ACK는 정상 복귀가 아님
-작업자가 Switch를 눌러 ACK하더라도 센서 이상 상태는 계속 감시합니다. 실제 환경이 정상으로 돌아오지 않으면 일정 시간 후 재알람합니다.
-
-### 3. 센서 데이터와 이벤트 데이터 분리
-연속 측정값은 `sensor_data`, 상태 변화는 `alarm_event`에 저장하여 Trend 분석과 Alarm History를 각각 조회할 수 있도록 구성했습니다.
+남은 작업:
+- [ ] Arduino USB Device를 WSL2에 연결
+- [ ] Linux Serial Device 확인
+- [ ] Middleware 실제 Serial 수신 테스트
+- [ ] Arduino → PostgreSQL → Streamlit End-to-End 테스트
+- [ ] V2를 별도 Repository로 분리하여 최종 보존
 
 ---
 
-## 📌 Current Scope
+## 💡 What I Learned from V1 → V2
 
-교육 및 PoC 목적의 Mini Factory Environment Monitoring System입니다.
+이번 Migration에서 중요하게 확인한 구조는 다음과 같습니다.
 
-현재 구현 범위:
-- 실시간 환경 측정
-- Threshold 기반 이상 판단
-- 센서별 LED 표시
-- Buzzer 현장 알람
-- 작업자 ACK
-- 미조치 재알람
-- Serial Middleware
-- SQLite 저장
-- Streamlit Dashboard
-- Alarm History
+```text
+pyserial
+= Python ↔ Arduino
+
+psycopg
+= Python ↔ PostgreSQL
+
+middleware.py
+= Arduino 데이터를 해석하고 DB에 저장
+
+db.py
+= PostgreSQL 연결 방법을 공통 관리
+
+dashboard.py
+= DB 데이터를 읽어 사용자에게 시각화
+```
+
+즉, **시스템의 역할은 유지하면서 특정 기술(SQLite)을 다른 기술(PostgreSQL)로 교체할 수 있도록 계층을 분리하는 것**이 V2의 핵심 학습 내용입니다.
 
 ---
 
