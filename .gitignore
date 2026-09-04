@@ -1,13 +1,17 @@
-# Python-generated files
+# Python
 __pycache__/
 *.pyc
 *.py[oc]
 build/
 dist/
 wheels/
-*.egg-info
-data/*.db
-.vscode/
+*.egg-info/
+
 # Virtual environments
-.venv
+.venv/
+
+# Local settings / secrets
 .env
+
+# Editors
+.vscode/
