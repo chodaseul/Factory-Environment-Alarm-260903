@@ -10,3 +10,4 @@ data/*.db
 .vscode/
 # Virtual environments
 .venv
+.env
