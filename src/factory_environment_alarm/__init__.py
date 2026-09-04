@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from factory-environment-alarm!")
+"""Factory Environment Alarm V2 package."""
